@@ -6,30 +6,29 @@
 #include <stdlib.h>
 #include <mpi.h>
 #include <unistd.h>
-#include <rpc/des_crypt.h>
+#include <openssl/evp.h>    // Incluir las cabeceras de OpenSSL para DES
 
-void decrypt(long key, char *ciph, int len){
-  //set parity of key and do decrypt
-  long k = 0;
-  for(int i=0; i<8; ++i){
-    key <<= 1;
-    k += (key & (0xFE << i*8));
-  }
-  des_setparity((char *)&k);  //el poder del casteo y &
-  ecb_crypt((char *)&k, (char *) ciph, 16, DES_DECRYPT);
+void decrypt(long key, char *ciph, int len) {
+  EVP_CIPHER_CTX *ctx;
+  int outlen1, outlen2;
+
+  ctx = EVP_CIPHER_CTX_new();
+  EVP_DecryptInit_ex(ctx, EVP_des_ecb(), NULL, (const unsigned char *)&key, NULL);
+  EVP_DecryptUpdate(ctx, (unsigned char *)ciph, &outlen1, (unsigned char *)ciph, len);
+  EVP_DecryptFinal_ex(ctx, (unsigned char *)ciph + outlen1, &outlen2);
+  EVP_CIPHER_CTX_free(ctx);
 }
 
-void encrypt(long key, char *ciph, int len){
-  //set parity of key and do decrypt
-  long k = 0;
-  for(int i=0; i<8; ++i){
-    key <<= 1;
-    k += (key & (0xFE << i*8));
-  }
-  des_setparity((char *)&k);  //el poder del casteo y &
-  ecb_crypt((char *)&k, (char *) ciph, 16, DES_ENCRYPT);
-}
+void encrypt(long key, char *ciph, int len) {
+  EVP_CIPHER_CTX *ctx;
+  int outlen1, outlen2;
 
+  ctx = EVP_CIPHER_CTX_new();
+  EVP_EncryptInit_ex(ctx, EVP_des_ecb(), NULL, (const unsigned char *)&key, NULL);
+  EVP_EncryptUpdate(ctx, (unsigned char *)ciph, &outlen1, (unsigned char *)ciph, len);
+  EVP_EncryptFinal_ex(ctx, (unsigned char *)ciph + outlen1, &outlen2);
+  EVP_CIPHER_CTX_free(ctx);
+}
 char search[] = " the ";
 int tryKey(long key, char *ciph, int len){
   char temp[len+1];
