@@ -1,90 +1,110 @@
-//bruteforce.c
-//nota: el key usado es bastante pequenio, cuando sea random speedup variara
-
-#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <openssl/aes.h>
 #include <mpi.h>
-#include <unistd.h>
-#include <openssl/evp.h>    // Incluir las cabeceras de OpenSSL para DES
 
-void decrypt(long key, char *ciph, int len) {
-  EVP_CIPHER_CTX *ctx;
-  int outlen1, outlen2;
+#define MAX_KEY_LENGTH 16
+#define BUFFER_SIZE 1024
 
-  ctx = EVP_CIPHER_CTX_new();
-  EVP_DecryptInit_ex(ctx, EVP_des_ecb(), NULL, (const unsigned char *)&key, NULL);
-  EVP_DecryptUpdate(ctx, (unsigned char *)ciph, &outlen1, (unsigned char *)ciph, len);
-  EVP_DecryptFinal_ex(ctx, (unsigned char *)ciph + outlen1, &outlen2);
-  EVP_CIPHER_CTX_free(ctx);
-}
+// Prototipos de funciones
+void encrypt(unsigned char *plaintext, unsigned char *key, unsigned char *ciphertext);
+void decrypt(unsigned char *ciphertext, unsigned char *key, unsigned char *plaintext);
+int tryKey(unsigned char *ciphertext, unsigned char *key, const char *searchString);
+void my_memcpy(void *dest, void *src, size_t n);
+int my_strstr(unsigned char *haystack, const char *needle);
 
-void encrypt(long key, char *ciph, int len) {
-  EVP_CIPHER_CTX *ctx;
-  int outlen1, outlen2;
+int main(int argc, char **argv) {
+    int rank, size;
+    unsigned char key[MAX_KEY_LENGTH];
+    unsigned char ciphertext[BUFFER_SIZE];
+    unsigned char plaintext[BUFFER_SIZE];
+    const char *searchString = "combinaciones";
+    double startTime, endTime;
 
-  ctx = EVP_CIPHER_CTX_new();
-  EVP_EncryptInit_ex(ctx, EVP_des_ecb(), NULL, (const unsigned char *)&key, NULL);
-  EVP_EncryptUpdate(ctx, (unsigned char *)ciph, &outlen1, (unsigned char *)ciph, len);
-  EVP_EncryptFinal_ex(ctx, (unsigned char *)ciph + outlen1, &outlen2);
-  EVP_CIPHER_CTX_free(ctx);
-}
-char search[] = " the ";
-int tryKey(long key, char *ciph, int len){
-  char temp[len+1];
-  memcpy(temp, ciph, len);
-  temp[len]=0;
-  decrypt(key, temp, len);
-  return strstr((char *)temp, search) != NULL;
-}
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
 
-unsigned char cipher[] = {108, 245, 65, 63, 125, 200, 150, 66, 17, 170, 207, 170, 34, 31, 70, 215, 0};
-int main(int argc, char *argv[]){ //char **argv
-  int N, id;
-  long upper = (1L <<56); //upper bound DES keys 2^56
-  long mylower, myupper;
-  MPI_Status st;
-  MPI_Request req;
-  int flag;
-  int ciphlen = strlen(cipher);
-  MPI_Comm comm = MPI_COMM_WORLD;
+    if (rank == 0) {
+        FILE *file = fopen("message.txt", "r");
+        if (!file) {
+            printf("Error al abrir el archivo.\n");
+            MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
+        }
+        fread(plaintext, sizeof(unsigned char), BUFFER_SIZE, file);
+        fclose(file);
 
-  MPI_Init(NULL, NULL);
-  MPI_Comm_size(comm, &N);
-  MPI_Comm_rank(comm, &id);
+        if (my_strstr(plaintext, searchString)) {
+            printf("El string '%s' está presente en el archivo de texto.\n", searchString);
+        } else {
+            printf("El string '%s' NO está presente en el archivo de texto.\n", searchString);
+        }
 
-  long range_per_node = upper / N;
-  mylower = range_per_node * id;
-  myupper = range_per_node * (id+1) -1;
-  if(id == N-1){
-    //compensar residuo
-    myupper = upper;
-  }
-
-  long found = 0;
-  int ready = 0;
-
-  MPI_Irecv(&found, 1, MPI_LONG, MPI_ANY_SOURCE, MPI_ANY_TAG, comm, &req);
-
-  for(long i = mylower; i<myupper; ++i){
-    MPI_Test(&req, &ready, MPI_STATUS_IGNORE);
-    if(ready)
-      break;  //ya encontraron, salir
-
-    if(tryKey(i, (char *)cipher, ciphlen)){
-      found = i;
-      for(int node=0; node<N; node++){
-        MPI_Send(&found, 1, MPI_LONG, node, 0, MPI_COMM_WORLD);
-      }
-      break;
+        // Ciframos el texto con una llave de ejemplo
+        unsigned char exampleKey[MAX_KEY_LENGTH] = "secretkey123456";
+        encrypt(plaintext, exampleKey, ciphertext);
     }
-  }
 
-  if(id==0){
-    MPI_Wait(&req, &st);
-    decrypt(found, (char *)cipher, ciphlen);
-    printf("%li %s\n", found, cipher);
-  }
+    MPI_Bcast(ciphertext, BUFFER_SIZE, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
 
-  MPI_Finalize();
+    startTime = MPI_Wtime();
+
+    unsigned long long i;
+    for (i = rank; i < (1ULL << (8 * MAX_KEY_LENGTH)); i += size) {
+        for (int j = 0; j < MAX_KEY_LENGTH; j++) {
+            key[j] = (i >> (8 * j)) & 0xFF;
+        }
+
+        if (tryKey(ciphertext, key, searchString)) {
+            printf("Proceso %d encontró la llave: %s\n", rank, key);
+            break;
+        }
+    }
+
+    endTime = MPI_Wtime();
+
+    if (rank == 0) {
+        printf("Tiempo total de ejecución: %f segundos.\n", endTime - startTime);
+    }
+
+    MPI_Finalize();
+    return 0;
+}
+
+void encrypt(unsigned char *plaintext, unsigned char *key, unsigned char *ciphertext) {
+    AES_KEY encryptKey;
+    AES_set_encrypt_key(key, 128, &encryptKey);
+    AES_encrypt(plaintext, ciphertext, &encryptKey);
+}
+
+void decrypt(unsigned char *ciphertext, unsigned char *key, unsigned char *plaintext) {
+    AES_KEY decryptKey;
+    AES_set_decrypt_key(key, 128, &decryptKey);
+    AES_decrypt(ciphertext, plaintext, &decryptKey);
+}
+
+int tryKey(unsigned char *ciphertext, unsigned char *key, const char *searchString) {
+    unsigned char decryptedText[BUFFER_SIZE];
+    decrypt(ciphertext, key, decryptedText);
+    return my_strstr(decryptedText, searchString);
+}
+
+void my_memcpy(void *dest, void *src, size_t n) {
+    char *csrc = (char *)src;
+    char *cdest = (char *)dest;
+    for (int i = 0; i < n; i++) {
+        cdest[i] = csrc[i];
+    }
+}
+
+int my_strstr(unsigned char *haystack, const char *needle) {
+    int len_haystack = strlen((char *)haystack);
+    int len_needle = strlen(needle);
+    for (int i = 0; i <= len_haystack - len_needle; i++) {
+        if (strncmp((char *)(haystack + i), needle, len_needle) == 0) {
+            return 1;
+        }
+    }
+    return 0;
 }
